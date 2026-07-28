@@ -33,6 +33,86 @@ unsigned int toUInt(const std::string& s, unsigned int fallback) {
     }
 }
 
+/// Validates and clamps a MinerConfig, returning human-readable warnings.
+std::vector<std::string> validate(MinerConfig& cfg) {
+    std::vector<std::string> warnings;
+
+    if (cfg.wallet.empty() || cfg.wallet == "YOUR_WALLET") {
+        warnings.push_back("Pool.wallet is not set; using placeholder wallet address.");
+    }
+    if (cfg.donateLevel > 100) {
+        warnings.push_back("Mining.donate_level > 100, clamping to 100.");
+        cfg.donateLevel = 100;
+    }
+    if (cfg.priority != "low" && cfg.priority != "normal" && cfg.priority != "high") {
+        warnings.push_back("Performance.priority invalid, defaulting to 'normal'.");
+        cfg.priority = "normal";
+    }
+    if (cfg.minerType != "cpu" && cfg.minerType != "gpu") {
+        warnings.push_back("Mining.miner_type invalid ('" + cfg.minerType + "'), defaulting to 'cpu'.");
+        cfg.minerType = "cpu";
+    }
+    if (cfg.hashrateIntervalSec == 0) {
+        warnings.push_back("Performance.print_hashrate_interval must be >0, using 5.");
+        cfg.hashrateIntervalSec = 5;
+    }
+    if (cfg.reconnectDelaySec == 0) {
+        warnings.push_back("Network.reconnect_delay must be >0, using 5.");
+        cfg.reconnectDelaySec = 5;
+    }
+    return warnings;
+}
+
+/// Shared implementation: parses a parsed INI map into a MinerConfig.
+MinerConfig parseSections(
+    const std::map<std::string, std::map<std::string, std::string>>& sections,
+    std::vector<std::string>& warnings) {
+
+    MinerConfig cfg;
+
+    auto section = [&sections](const std::string& name) -> const std::map<std::string, std::string>* {
+        const auto it = sections.find(name);
+        return it == sections.end() ? nullptr : &it->second;
+    };
+    auto get = [](const std::map<std::string, std::string>* sec,
+                  const std::string& key, const std::string& fallback) -> std::string {
+        if (!sec) return fallback;
+        const auto it = sec->find(key);
+        return it == sec->end() ? fallback : it->second;
+    };
+
+    if (const auto* pool = section("Pool")) {
+        cfg.poolUrl  = get(pool, "url", cfg.poolUrl);
+        cfg.wallet   = get(pool, "wallet", cfg.wallet);
+        cfg.worker   = get(pool, "worker", cfg.worker);
+        cfg.password = get(pool, "password", cfg.password);
+    }
+    if (const auto* mining = section("Mining")) {
+        cfg.threads     = toUInt(get(mining, "threads", "0"), 0);
+        cfg.algorithm   = get(mining, "algorithm", cfg.algorithm);
+        cfg.minerType   = get(mining, "miner_type", cfg.minerType);
+        cfg.cpuAffinity = toBool(get(mining, "cpu_affinity", "true"), true);
+        cfg.hugePages   = toBool(get(mining, "huge_pages", "true"), true);
+        cfg.donateLevel = toUInt(get(mining, "donate_level", "1"), 1);
+    }
+    if (const auto* perf = section("Performance")) {
+        cfg.priority           = get(perf, "priority", cfg.priority);
+        cfg.hashrateIntervalSec = toUInt(get(perf, "print_hashrate_interval", "5"), 5);
+        cfg.benchmark          = toBool(get(perf, "benchmark", "false"), false);
+    }
+    if (const auto* log = section("Logging")) {
+        cfg.logLevel = get(log, "level", cfg.logLevel);
+        cfg.logFile  = get(log, "log_file", cfg.logFile);
+    }
+    if (const auto* net = section("Network")) {
+        cfg.reconnectDelaySec = toUInt(get(net, "reconnect_delay", "5"), 5);
+        cfg.keepAlive          = toBool(get(net, "keep_alive", "true"), true);
+    }
+
+    warnings = validate(cfg);
+    return cfg;
+}
+
 } // namespace
 
 ConfigManager::ConfigManager(std::filesystem::path path) : path_(std::move(path)) {}
@@ -105,34 +185,6 @@ ConfigManager::parseIni(const std::string& text) {
     return result;
 }
 
-std::vector<std::string> ConfigManager::validate(MinerConfig& cfg) {
-    std::vector<std::string> warnings;
-
-    if (cfg.wallet.empty() || cfg.wallet == "YOUR_WALLET") {
-        warnings.push_back("Pool.wallet is not set; using placeholder wallet address.");
-    }
-    if (cfg.donateLevel > 100) {
-        warnings.push_back("Mining.donate_level > 100, clamping to 100.");
-        cfg.donateLevel = 100;
-    }
-    if (cfg.priority != "low" && cfg.priority != "normal" && cfg.priority != "high") {
-        warnings.push_back("Performance.priority invalid, defaulting to 'normal'.");
-        cfg.priority = "normal";
-    }
-    if (cfg.minerType != "cpu" && cfg.minerType != "gpu") {
-        warnings.push_back("Mining.miner_type invalid ('" + cfg.minerType + "'), defaulting to 'cpu'.");
-        cfg.minerType = "cpu";
-    }
-    if (cfg.hashrateIntervalSec == 0) {
-        warnings.push_back("Performance.print_hashrate_interval must be >0, using 5.");
-        cfg.hashrateIntervalSec = 5;
-    }
-    if (cfg.reconnectDelaySec == 0) {
-        warnings.push_back("Network.reconnect_delay must be >0, using 5.");
-        cfg.reconnectDelaySec = 5;
-    }
-    return warnings;
-}
 
 MinerConfig ConfigManager::load() {
     if (!std::filesystem::exists(path_)) {
@@ -147,49 +199,14 @@ MinerConfig ConfigManager::load() {
     buffer << in.rdbuf();
 
     const auto sections = parseIni(buffer.str());
-    MinerConfig cfg;
+    const auto result = parseSections(sections, warnings_);
+    return result;
+}
 
-    auto section = [&sections](const std::string& name) -> const std::map<std::string, std::string>* {
-        const auto it = sections.find(name);
-        return it == sections.end() ? nullptr : &it->second;
-    };
-    auto get = [](const std::map<std::string, std::string>* sec,
-                  const std::string& key, const std::string& fallback) -> std::string {
-        if (!sec) return fallback;
-        const auto it = sec->find(key);
-        return it == sec->end() ? fallback : it->second;
-    };
-
-    if (const auto* pool = section("Pool")) {
-        cfg.poolUrl  = get(pool, "url", cfg.poolUrl);
-        cfg.wallet   = get(pool, "wallet", cfg.wallet);
-        cfg.worker   = get(pool, "worker", cfg.worker);
-        cfg.password = get(pool, "password", cfg.password);
-    }
-    if (const auto* mining = section("Mining")) {
-        cfg.threads     = toUInt(get(mining, "threads", "0"), 0);
-        cfg.algorithm   = get(mining, "algorithm", cfg.algorithm);
-        cfg.minerType   = get(mining, "miner_type", cfg.minerType);
-        cfg.cpuAffinity = toBool(get(mining, "cpu_affinity", "true"), true);
-        cfg.hugePages   = toBool(get(mining, "huge_pages", "true"), true);
-        cfg.donateLevel = toUInt(get(mining, "donate_level", "1"), 1);
-    }
-    if (const auto* perf = section("Performance")) {
-        cfg.priority           = get(perf, "priority", cfg.priority);
-        cfg.hashrateIntervalSec = toUInt(get(perf, "print_hashrate_interval", "5"), 5);
-        cfg.benchmark          = toBool(get(perf, "benchmark", "false"), false);
-    }
-    if (const auto* log = section("Logging")) {
-        cfg.logLevel = get(log, "level", cfg.logLevel);
-        cfg.logFile  = get(log, "log_file", cfg.logFile);
-    }
-    if (const auto* net = section("Network")) {
-        cfg.reconnectDelaySec = toUInt(get(net, "reconnect_delay", "5"), 5);
-        cfg.keepAlive          = toBool(get(net, "keep_alive", "true"), true);
-    }
-
-    warnings_ = validate(cfg); // surfaced to caller via lastWarnings()
-    return cfg;
+MinerConfig ConfigManager::loadFromString(const std::string& iniContent) {
+    const auto sections = parseIni(iniContent);
+    const auto result = parseSections(sections, warnings_);
+    return result;
 }
 
 } // namespace cppminer::config

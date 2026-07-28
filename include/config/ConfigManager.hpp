@@ -56,6 +56,10 @@ public:
     /// Throws std::runtime_error on unrecoverable I/O or validation errors.
     MinerConfig load();
 
+    /// Loads configuration from an INI-formatted string (e.g. the config
+    /// that was embedded into the binary at build time). No file I/O.
+    MinerConfig loadFromString(const std::string& iniContent);
+
     /// Writes out the built-in default configuration to disk_.
     void writeDefaultFile() const;
 
@@ -69,11 +73,6 @@ private:
     /// Parses raw INI text into a two-level map: section -> key -> value.
     static std::map<std::string, std::map<std::string, std::string>>
     parseIni(const std::string& text);
-
-    /// Applies validation rules (ranges, required fields) to a loaded
-    /// config, correcting or throwing as appropriate. Warnings are
-    /// returned as human-readable strings for the caller to log.
-    static std::vector<std::string> validate(MinerConfig& cfg);
 
     std::filesystem::path path_;
     std::vector<std::string> warnings_;

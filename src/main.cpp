@@ -23,6 +23,7 @@
 #include "utils/CpuInfo.hpp"
 #include "network/StratumClient.hpp"
 #include "miner/MinerEngine.hpp"
+#include "EmbeddedConfig.hpp"
 
 namespace {
 
@@ -116,7 +117,7 @@ cppminer::config::MinerConfig parseConfig(int argc, char** argv) {
         }
     }
 
-    // Load from file if available
+    // Load from file if available, otherwise use embedded config from binary
     if (loadConfigFile) {
         cppminer::config::ConfigManager configManager(configPath);
         try {
@@ -125,6 +126,10 @@ cppminer::config::MinerConfig parseConfig(int argc, char** argv) {
             std::cerr << "Fatal: failed to load configuration: " << ex.what() << "\n";
             std::exit(1);
         }
+    } else {
+        // Use the config that was embedded into the binary at build time
+        cppminer::config::ConfigManager configManager("");
+        cfg = configManager.loadFromString(cppminer::config::embeddedConfig());
     }
 
     // Apply CLI flags (override file and built-in defaults)
