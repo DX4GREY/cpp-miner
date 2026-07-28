@@ -1,0 +1,25 @@
+# Build output
+build/
+cmake-build-*/
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Log files
+*.log
+miner.log
+
+# Sensitive configuration (contains wallet address & pool password)
+config.ini
+
+# Compiled binaries
+cpp-miner
+*.o
+*.obj
+*.exe
+*.out
