@@ -88,13 +88,46 @@ cppminer::miner::MiningJob createSyntheticJob() {
 }
 
 /// Parses CLI flags and overlays them onto the given MinerConfig.
-/// Supports both individual flags and --config file loading.
+/// Auto-detects config.ini in the current directory if it exists.
+/// Supports --config <path> to specify a custom file.
+/// Individual CLI flags always override file values.
 cppminer::config::MinerConfig parseConfig(int argc, char** argv) {
     cppminer::config::MinerConfig cfg; // all built-in defaults
 
-    bool loadConfigFile = false;
+    // Check for --config flag first, or auto-detect config.ini
     std::filesystem::path configPath;
+    bool loadConfigFile = false;
 
+    for (int i = 1; i < argc; ++i) {
+        const std::string arg = argv[i];
+        if (arg == "--config" && i + 1 < argc) {
+            configPath = argv[++i];
+            loadConfigFile = true;
+            break;
+        }
+    }
+
+    // If no --config flag, check if config.ini exists in the current directory
+    if (!loadConfigFile) {
+        const std::filesystem::path defaultConfig = "config.ini";
+        if (std::filesystem::exists(defaultConfig)) {
+            configPath = defaultConfig;
+            loadConfigFile = true;
+        }
+    }
+
+    // Load from file if available
+    if (loadConfigFile) {
+        cppminer::config::ConfigManager configManager(configPath);
+        try {
+            cfg = configManager.load();
+        } catch (const std::exception& ex) {
+            std::cerr << "Fatal: failed to load configuration: " << ex.what() << "\n";
+            std::exit(1);
+        }
+    }
+
+    // Apply CLI flags (override file and built-in defaults)
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
 
@@ -111,8 +144,7 @@ cppminer::config::MinerConfig parseConfig(int argc, char** argv) {
         };
 
         if (arg == "--config" && i + 1 < argc) {
-            configPath = argv[++i];
-            loadConfigFile = true;
+            ++i; // skip value, already handled above
         } else if (arg == "--url")           { cfg.poolUrl = nextArg(); }
         else if (arg == "--wallet")          { cfg.wallet = nextArg(); }
         else if (arg == "--worker")          { cfg.worker = nextArg(); }
@@ -130,32 +162,6 @@ cppminer::config::MinerConfig parseConfig(int argc, char** argv) {
         else if (arg == "--benchmark")       { cfg.benchmark = true; }
         else if (arg == "--help" || arg == "-h") { printHelp(argv[0]); std::exit(0); }
         else if (arg == "--version" || arg == "-v") { std::cout << kVersion << "\n"; std::exit(0); }
-    }
-
-    // If --config was passed, load from file, then CLI flags override file values
-    if (loadConfigFile) {
-        cppminer::config::ConfigManager configManager(configPath);
-        try {
-            cfg = configManager.load();
-        } catch (const std::exception& ex) {
-            std::cerr << "Fatal: failed to load configuration: " << ex.what() << "\n";
-            std::exit(1);
-        }
-        // Re-apply individual CLI flags to override file values
-        for (int i = 1; i < argc; ++i) {
-            const std::string arg = argv[i];
-            auto nextArg = [&]() -> std::string {
-                if (i + 1 < argc) return argv[++i];
-                return "";
-            };
-            if (arg == "--url")           { cfg.poolUrl = nextArg(); }
-            else if (arg == "--wallet")    { cfg.wallet = nextArg(); }
-            else if (arg == "--worker")    { cfg.worker = nextArg(); }
-            else if (arg == "--password")  { cfg.password = nextArg(); }
-            else if (arg == "--threads")   { cfg.threads = static_cast<unsigned int>(std::stoul(nextArg())); }
-            else if (arg == "--algorithm") { cfg.algorithm = nextArg(); }
-            else if (arg == "--miner-type") { cfg.minerType = nextArg(); }
-        }
     }
 
     return cfg;
