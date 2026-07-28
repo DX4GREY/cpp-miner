@@ -248,32 +248,42 @@ void StratumClient::submitShare(const std::string& jobId,
 }
 
 void StratumClient::handleNotify(const Value& params) {
-    if (params.type() != Value::Type::Array || params.asArray().size() < 8) {
-        logger_.warn("Stratum: malformed mining.notify, ignoring.");
+    // Log the actual params structure so we can see the format
+    logger_.info("Stratum: mining.notify type=" +
+                 std::to_string(static_cast<int>(params.type())) +
+                 " size=" + (params.type() == Value::Type::Array ?
+                   std::to_string(params.asArray().size()) : "N/A") +
+                 " data=" + params.dump().substr(0, 300));
+
+    // MoneroOcean and other XMR pools send params as an array with >= 9 elements
+    if (params.type() == Value::Type::Array && params.asArray().size() >= 9) {
+        const auto& arr = params.asArray();
+
+        miner::MiningJob job;
+        job.jobId     = arr[0].asString();
+        job.prevHash  = arr[1].asString();
+        job.coinbase1 = arr[2].asString();
+        job.coinbase2 = arr[3].asString();
+        if (arr[4].type() == Value::Type::Array) {
+            for (const auto& branch : arr[4].asArray()) {
+                job.merkleBranches.push_back(branch.asString());
+            }
+        }
+        job.version    = arr[5].asString();
+        job.bits       = arr[6].asString();
+        job.time       = arr[7].asString();
+        job.cleanJobs  = (arr.size() > 8 && arr[8].type() == Value::Type::Bool) ? arr[8].asBool() : false;
+        job.extranonce1 = extranonce1_;
+        job.extranonce2Size = extranonce2Size_;
+
+        currentJobId_ = job.jobId;
+        logger_.info("Stratum: received job " + job.jobId + " (clean=" +
+                     (job.cleanJobs ? "true" : "false") + ")");
+        if (onJob_) onJob_(job);
         return;
     }
-    const auto& arr = params.asArray();
 
-    miner::MiningJob job;
-    job.jobId     = arr[0].asString();
-    job.prevHash  = arr[1].asString();
-    job.coinbase1 = arr[2].asString();
-    job.coinbase2 = arr[3].asString();
-    if (arr[4].type() == Value::Type::Array) {
-        for (const auto& branch : arr[4].asArray()) {
-            job.merkleBranches.push_back(branch.asString());
-        }
-    }
-    job.version    = arr[5].asString();
-    job.bits       = arr[6].asString();
-    job.time       = arr[7].asString();
-    job.cleanJobs  = (arr.size() > 8 && arr[8].type() == Value::Type::Bool) ? arr[8].asBool() : false;
-    job.extranonce1 = extranonce1_;
-    job.extranonce2Size = extranonce2Size_;
-
-    currentJobId_ = job.jobId;
-    logger_.debug("Stratum: received job " + job.jobId);
-    if (onJob_) onJob_(job);
+    logger_.warn("Stratum: unexpected mining.notify format, ignoring.");
 }
 
 void StratumClient::handleSetDifficulty(const Value& params) {
