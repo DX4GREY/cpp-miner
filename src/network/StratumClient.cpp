@@ -208,13 +208,20 @@ bool StratumClient::connectOnce() {
 
 bool StratumClient::sendLine(const std::string& jsonLine) {
     std::lock_guard<std::mutex> lock(writeMutex_);
-    if (socketFd_ < 0) return false;
+    if (socketFd_ < 0) {
+        logger_.warn("Stratum: sendLine socket closed.");
+        return false;
+    }
     const std::string withNewline = jsonLine + "\n";
     std::size_t sent = 0;
     while (sent < withNewline.size()) {
         const ssize_t n = ::send(socketFd_, withNewline.data() + sent,
                                   withNewline.size() - sent, MSG_NOSIGNAL);
-        if (n <= 0) return false;
+        if (n <= 0) {
+            logger_.warn("Stratum: sendLine error errno=" + std::to_string(errno) +
+                          " msg=" + std::string(std::strerror(errno)));
+            return false;
+        }
         sent += static_cast<std::size_t>(n);
     }
     return true;
@@ -224,6 +231,8 @@ void StratumClient::submitShare(const std::string& jobId,
                                  const std::string& extranonce2,
                                  const std::string& ntime,
                                  const std::string& nonceHex) {
+    logger_.info("Stratum: submitting classic share for job " + jobId +
+                 " nonce=" + nonceHex.substr(0, 16) + "...");
     Value params = Value::makeArray();
     params.push(Value::makeString(wallet_ + "." + worker_));
     params.push(Value::makeString(jobId));
@@ -247,6 +256,33 @@ void StratumClient::submitShare(const std::string& jobId,
     }
 }
 
+void StratumClient::submitBlobShare(const std::string& jobId,
+                                    const std::string& workBlob) {
+    logger_.info("Stratum: submitting blob share for job " + jobId +
+                 " blob=" + workBlob.substr(0, 32) + "...");
+    Value params = Value::makeArray();
+    params.push(Value::makeString(wallet_ + "." + worker_));
+    params.push(Value::makeString(jobId));
+    params.push(Value::makeString(workBlob));
+
+    int requestId = 0;
+    {
+        std::lock_guard<std::mutex> lock(pendingMutex_);
+        requestId = ++nextRequestId_;
+    }
+
+    Value req = Value::makeObject();
+    req.set("id", Value::makeNumber(requestId));
+    req.set("method", Value::makeString("mining.submit"));
+    req.set("params", params);
+
+    const std::string json = req.dump();
+    logger_.debug("DBG: submit json=" + json.substr(0, 512));
+    if (!sendLine(json)) {
+        logger_.warn("Stratum: failed to submit blob share (socket write error).");
+    }
+}
+
 void StratumClient::handleNotify(const Value& params) {
     // Log the actual params structure so we can see the format
     logger_.info("Stratum: mining.notify type=" +
@@ -255,11 +291,41 @@ void StratumClient::handleNotify(const Value& params) {
                    std::to_string(params.asArray().size()) : "N/A") +
                  " data=" + params.dump().substr(0, 300));
 
-    // MoneroOcean and other XMR pools send params as an array with >= 9 elements
-    if (params.type() == Value::Type::Array && params.asArray().size() >= 9) {
-        const auto& arr = params.asArray();
+    // MoneroOcean and many XMR pools send params as an array with exactly 7 elements:
+    // [job_id, blob, seed_hash, prev_hash, difficulty, ...]
+    // Or with >= 9 for classic format.
+    if (params.type() != Value::Type::Array) {
+        logger_.warn("Stratum: unexpected mining.notify format, ignoring.");
+        return;
+    }
 
-        miner::MiningJob job;
+    const auto& arr = params.asArray();
+    miner::MiningJob job;
+
+    job.extranonce1 = extranonce1_;
+    job.extranonce2Size = extranonce2Size_;
+
+    if (arr.size() == 7) {
+        // MoneroOcean style: [job_id, blob, seed_hash, prev_hash, difficulty, ...]
+        // We need at least 3 elements for the essential fields.
+        if (arr.size() < 4) {
+            logger_.warn("Stratum: unexpected mining.notify format, ignoring.");
+            return;
+        }
+        job.jobId     = arr[0].asString();
+        job.blob      = arr[1].asString();
+        job.seedHash  = arr[2].asString();
+        job.prevHash  = arr[3].asString();
+        job.difficulty = arr.size() > 4 ? arr[4].asNumber() : 1.0;
+        job.cleanJobs = arr.size() > 5 ? (arr[5].type() == Value::Type::Bool ? arr[5].asBool() : false) : false;
+        job.bits = "1d00ffff";  // not used when blob is present
+        job.time = "00000000";  // not used when blob is present
+        currentJobId_ = job.jobId;
+        logger_.info("Stratum: received MoneroOcean job " + job.jobId + " blob=" + job.blob.substr(0, 64) + "...");
+        if (onJob_) onJob_(job);
+        return;
+    } else if (arr.size() >= 9) {
+        // Classic 9-param format
         job.jobId     = arr[0].asString();
         job.prevHash  = arr[1].asString();
         job.coinbase1 = arr[2].asString();
@@ -272,12 +338,9 @@ void StratumClient::handleNotify(const Value& params) {
         job.version    = arr[5].asString();
         job.bits       = arr[6].asString();
         job.time       = arr[7].asString();
-        job.cleanJobs  = (arr.size() > 8 && arr[8].type() == Value::Type::Bool) ? arr[8].asBool() : false;
-        job.extranonce1 = extranonce1_;
-        job.extranonce2Size = extranonce2Size_;
-
+        job.cleanJobs  = (arr[8].type() == Value::Type::Bool) ? arr[8].asBool() : false;
         currentJobId_ = job.jobId;
-        logger_.info("Stratum: received job " + job.jobId + " (clean=" +
+        logger_.info("Stratum: received classic job " + job.jobId + " (clean=" +
                      (job.cleanJobs ? "true" : "false") + ")");
         if (onJob_) onJob_(job);
         return;
@@ -298,13 +361,19 @@ void StratumClient::handleResponse(const Value& msg) {
     // "error". We distinguish subscribe/authorize (ids 1/2) from share
     // submissions (ids >= 3) by convention established in this class.
     const auto idOpt = msg.get("id");
-    if (!idOpt || idOpt->type() != Value::Type::Number) return;
+    if (!idOpt || idOpt->type() != Value::Type::Number) {
+        logger_.debug("Stratum: response without numeric id");
+        return;
+    }
     const int id = static_cast<int>(idOpt->asNumber());
 
     const auto resultOpt = msg.get("result");
     const bool resultTrue = resultOpt && resultOpt->type() == Value::Type::Bool && resultOpt->asBool();
     const bool hasError = msg.get("error").has_value() &&
                            msg.get("error")->type() != Value::Type::Null;
+
+    const std::string raw = msg.dump();
+    logger_.debug("Stratum: response id=" + std::to_string(id) + " raw=" + raw.substr(0, 300));
 
     if (id == 2) {
         // mining.authorize response.
@@ -335,6 +404,11 @@ void StratumClient::handleResponse(const Value& msg) {
         if (errorOpt && errorOpt->type() == Value::Type::Array && !errorOpt->asArray().empty()) {
             result.message = errorOpt->asArray().back().asString();
         }
+        logger_.warn("Stratum: share result id=" + std::to_string(id) +
+                      " accepted=" + std::to_string(result.accepted) +
+                      " msg=" + result.message + " raw=" + raw.substr(0, 200));
+    } else {
+        logger_.info("Stratum: share accepted id=" + std::to_string(id));
     }
     if (onSubmit_) onSubmit_(result);
 }
@@ -413,11 +487,18 @@ void StratumClient::runLoop() {
             }
 
             if (pfds[kSocketFdIndex].revents & (POLLHUP | POLLERR | POLLNVAL)) {
+                logger_.warn("Stratum: socket event revents=" + std::to_string(pfds[kSocketFdIndex].revents));
                 break;
             }
 
             const ssize_t n = ::recv(socketFd_, recvBuf, sizeof(recvBuf), 0);
             if (n <= 0) {
+                if (n == 0) {
+                    logger_.warn("Stratum: recv connection closed by peer.");
+                } else {
+                    logger_.warn("Stratum: recv error errno=" + std::to_string(errno) +
+                                  " msg=" + std::string(std::strerror(errno)));
+                }
                 break; // connection closed or error -> reconnect
             }
             lineBuffer.append(recvBuf, static_cast<std::size_t>(n));

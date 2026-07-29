@@ -77,6 +77,9 @@ public:
                       const std::string& ntime,
                       const std::string& nonceHex);
 
+    void submitBlobShare(const std::string& jobId,
+                         const std::string& workBlob);
+
     /// True once subscribe+authorize has completed successfully.
     [[nodiscard]] bool isAuthorized() const noexcept { return authorized_.load(); }
 

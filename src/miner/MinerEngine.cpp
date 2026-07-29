@@ -6,6 +6,7 @@
 #include <iomanip>
 #include <cstring>
 #include <random>
+#include <cstdlib>
 
 namespace cppminer::miner {
 
@@ -62,6 +63,15 @@ void MinerEngine::updateJob(const MiningJob& job) {
 }
 
 void MinerEngine::updateDifficulty(double difficulty) noexcept {
+    if (const char* env = std::getenv("CPP_MINER_DBG_DIFF")) {
+        const double overrideDiff = std::atof(env);
+        if (overrideDiff > 0.0) {
+            logger_.warn("DBG: overriding difficulty " + std::to_string(difficulty) +
+                          " -> " + std::to_string(overrideDiff));
+            difficulty_.store(overrideDiff, std::memory_order_relaxed);
+            return;
+        }
+    }
     difficulty_.store(difficulty, std::memory_order_relaxed);
 }
 
@@ -121,32 +131,132 @@ void MinerEngine::workerLoop(std::size_t workerIndex) {
         }
         const MiningJob job = *jobOpt; // cheap copy: small struct of strings
 
-        // Build the "header" bytes this worker hashes against: a
-        // simplified concatenation of job fields. A real Stratum miner
-        // assembles the exact coinbase transaction + merkle root here;
-        // this reference pipeline keeps that assembly logic isolated so
-        // swapping in a real algorithm/coin only touches this block.
         const std::string extranonce2 = toHex(static_cast<std::uint32_t>(workerIndex), job.extranonce2Size * 2);
-        std::string headerStr = job.prevHash + job.coinbase1 + job.extranonce1 +
-                                 extranonce2 + job.coinbase2 + job.version + job.bits + job.time;
-        if (headerStr.size() > 200) headerStr.resize(200); // keep within scratch buffer bounds
-
         const auto threshold = difficultyToThreshold(difficulty_.load(std::memory_order_relaxed));
 
-        // Hash a batch of nonces before checking for job changes / stop
-        // requests, to amortize the atomic loads below.
-        constexpr int kBatchSize = 2048;
-        for (int i = 0; i < kBatchSize; ++i) {
-            hash::Digest256 digest{};
-            algorithm->hash(reinterpret_cast<const std::uint8_t*>(headerStr.data()),
-                             headerStr.size(), nonce, digest);
-            counters_.hashesTotal.fetch_add(1, std::memory_order_relaxed);
-
-            if (leadingBits(digest) < threshold) {
-                // Found a share meeting the current target: submit it.
-                stratumClient_.submitShare(job.jobId, extranonce2, job.time, toHex(nonce, 8));
+        if (!job.blob.empty()) {
+            // MoneroOcean-style: mine directly against the provided blob.
+            // The pool expects us to replace the 4-byte nonce field starting at
+            // blob offset 0 (LE) and submit the modified blob back.
+            if (job.blob.size() < 4) {
+                continue; // malformed blob, wait for next job
             }
-            nonce += nonceStep;
+
+            std::string workBlob = job.blob;
+            // The blob is hex; each byte is represented by two hex chars.
+            const std::size_t blobBytes = workBlob.size() / 2;
+            logger_.info("DBG: blob size hex=" + std::to_string(workBlob.size()) +
+                          " bytes=" + std::to_string(blobBytes) + " first64=" + workBlob.substr(0, 64));
+            // Try writing the nonce near the end of the blob to avoid out-of-bounds
+            // writes if the pool uses a short blob. We will scan backwards from the
+            // end to find the first occurrence of the original 4-byte nonce pattern.
+            std::size_t nonceOffsetBytes = (blobBytes >= 8 ? blobBytes - 4 : 0);
+            std::size_t nonceOffsetChars = nonceOffsetBytes * 2;
+            // If the write didn't stick, scan backwards from the end to find a
+            // location that accepts new nonce values.
+            {
+                const std::string testNonce = "01234567";
+                std::string probe = workBlob;
+                bool wroteAny = false;
+                for (int b = 0; b < 4; ++b) {
+                    probe[nonceOffsetChars + b * 2] = testNonce[b * 2];
+                    probe[nonceOffsetChars + b * 2 + 1] = testNonce[b * 2 + 1];
+                }
+                bool changed = false;
+                for (int b = 0; b < 4; ++b) {
+                    if (probe.substr(nonceOffsetChars + b * 2, 2) != workBlob.substr(nonceOffsetChars + b * 2, 2)) {
+                        changed = true;
+                        break;
+                    }
+                }
+                if (!changed && blobBytes >= 12) {
+                    // scan backwards for first writable 4-byte slot
+                    bool found = false;
+                    for (std::size_t off = blobBytes - 4; off > 0; --off) {
+                        std::string p2 = workBlob;
+                        const std::size_t c = off * 2;
+                        for (int b = 0; b < 4; ++b) {
+                            p2[c + b * 2] = testNonce[b * 2];
+                            p2[c + b * 2 + 1] = testNonce[b * 2 + 1];
+                        }
+                        bool ch = false;
+                        for (int b = 0; b < 4; ++b) {
+                            if (p2.substr(c + b * 2, 2) != workBlob.substr(c + b * 2, 2)) {
+                                ch = true;
+                                break;
+                            }
+                        }
+                        if (ch) {
+                            nonceOffsetBytes = off;
+                            nonceOffsetChars = c;
+                            found = true;
+                            logger_.warn("DBG: using alternate nonce offset=" + std::to_string(off));
+                            break;
+                        }
+                    }
+                    if (!found) {
+                        // fallback: try writing at the very end again
+                        nonceOffsetBytes = blobBytes - 4;
+                        nonceOffsetChars = nonceOffsetBytes * 2;
+                        logger_.warn("DBG: falling back to end nonce offset=" + std::to_string(nonceOffsetBytes));
+                    }
+                }
+            }
+            const std::uint32_t baseNonce = nonce;
+
+            // Hash a batch of nonces before checking for job changes / stop
+            // requests, to amortize the atomic loads below.
+            constexpr int kBatchSize = 2048;
+            for (int i = 0; i < kBatchSize; ++i) {
+                // Encode nonce as 8-char hex LE into the blob.
+                const std::string nonceHex = toHex(baseNonce + static_cast<std::uint32_t>(i) * nonceStep, 8);
+                for (int b = 0; b < 4; ++b) {
+                    workBlob[nonceOffsetChars + b * 2]     = nonceHex[b * 2];
+                    workBlob[nonceOffsetChars + b * 2 + 1] = nonceHex[b * 2 + 1];
+                }
+
+                // Convert hex blob to raw bytes for hashing.
+                std::vector<std::uint8_t> rawBlob(workBlob.size() / 2);
+                for (std::size_t j = 0; j < rawBlob.size(); ++j) {
+                    const unsigned int byteVal = std::stoul(workBlob.substr(j * 2, 2), nullptr, 16);
+                    rawBlob[j] = static_cast<std::uint8_t>(byteVal);
+                }
+
+                hash::Digest256 digest{};
+                algorithm->hash(reinterpret_cast<const std::uint8_t*>(rawBlob.data()),
+                                 rawBlob.size(), 0, digest);
+                counters_.hashesTotal.fetch_add(1, std::memory_order_relaxed);
+
+                if (leadingBits(digest) < threshold && job.jobId != "synthetic-standby") {
+                    // Found a share: submit using the modified blob.
+                    stratumClient_.submitBlobShare(job.jobId, workBlob);
+                    logger_.info("DBG: share candidate nonce=" + nonceHex + " leading=" +
+                                 std::to_string(leadingBits(digest)) + " threshold=" +
+                                 std::to_string(threshold) + " nonceOffset=" +
+                                 std::to_string(nonceOffsetBytes));
+                }
+            }
+        } else {
+            // Classic assembly: build header from individual fields.
+            std::string headerStr = job.prevHash + job.coinbase1 + job.extranonce1 +
+                                     extranonce2 + job.coinbase2 + job.version + job.bits + job.time;
+            if (headerStr.size() > 200) headerStr.resize(200);
+
+            // Hash a batch of nonces before checking for job changes / stop
+            // requests, to amortize the atomic loads below.
+            constexpr int kBatchSize = 2048;
+            for (int i = 0; i < kBatchSize; ++i) {
+                hash::Digest256 digest{};
+                algorithm->hash(reinterpret_cast<const std::uint8_t*>(headerStr.data()),
+                                 headerStr.size(), nonce, digest);
+                counters_.hashesTotal.fetch_add(1, std::memory_order_relaxed);
+
+                if (leadingBits(digest) < threshold && job.jobId != "synthetic-standby") {
+                    // Found a share meeting the current target: submit it.
+                    stratumClient_.submitShare(job.jobId, extranonce2, job.time, toHex(nonce, 8));
+                }
+                nonce += nonceStep;
+            }
         }
 
         if (!running_.load(std::memory_order_relaxed)) break;

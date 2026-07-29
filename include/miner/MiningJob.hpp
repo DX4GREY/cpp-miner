@@ -13,7 +13,7 @@
 
 namespace cppminer::miner {
 
-/// A single unit of mining work handed out by the pool.
+/// A single unit of mining work handed out by a pool.
 struct MiningJob {
     std::string jobId;
     std::string prevHash;
@@ -33,6 +33,10 @@ struct MiningJob {
     // Pool-assigned difficulty (from "mining.set_difficulty"); the miner
     // must only submit shares whose hash meets this target or better.
     double difficulty = 1.0;
+
+    // MoneroOcean-style fields (seed_hash + ready-to-mine blob)
+    std::string seedHash;
+    std::string blob;
 };
 
 } // namespace cppminer::miner
