@@ -8,10 +8,10 @@ each live in their own folder with a narrow interface between them.
 are built-in and can be overridden via command-line flags.
 
 > **Honest scope note:** this project ships a pluggable `IHashAlgorithm`
-> interface and a working reference algorithm (double SHA-256) so the entire
-> pipeline — config → Stratum handshake → job intake → hashing → share
-> submission → stats — runs end to end out of the box. It does **not**
-> reimplement RandomX itself (RandomX is a ~10k-line memory-hard virtual
+> interface and a working reference algorithm (double SHA-256 and a CryptoNight
+> stub) so the entire pipeline — config → Stratum handshake → job intake →
+> hashing → share submission → stats — runs end to end out of the box. It does
+> **not** reimplement RandomX itself (RandomX is a ~10k-line memory-hard virtual
 > machine with a JIT compiler — a dedicated library, not something bolted onto
 > an app like this). See "Adding a new algorithm" below for exactly where a
 > real RandomX binding plugs in.
@@ -38,7 +38,7 @@ are built-in and can be overridden via command-line flags.
 │   ├── utils/{CpuInfo,Types,MiniJson}.hpp
 │   ├── network/StratumClient.hpp
 │   ├── miner/{MiningJob,MinerEngine}.hpp
-│   ├── hash/{IHashAlgorithm,Sha256dAlgorithm,HashAlgorithmFactory}.hpp
+│   ├── hash/{IHashAlgorithm,Sha256dAlgorithm,CryptonightAlgorithm,HashAlgorithmFactory}.hpp
 │   ├── threading/{JobQueue,ThreadPool}.hpp
 │   └── logger/Logger.hpp
 └── src/                         # implementation, one .cpp per header above
@@ -64,7 +64,7 @@ and needs nothing else.
 ### Quick start (no config file needed)
 
 ```bash
-./cpp-miner --url stratum+tcp://pool.supportxmr.com:3333 --wallet YOUR_WALLET_ADDRESS --worker rig01 --threads 16
+./cpp-miner --url stratum+tcp://pool.supportxmr.com:3333 --wallet YOUR_WALLET_ADDRESS --worker rig01 --threads 16 --algorithm cryptonight
 ```
 
 ### Using a config file (optional)
@@ -111,20 +111,29 @@ Options:
   --version                 Show version information
 ```
 
+### Supported algorithms
+
+- `randomx` — reference SHA-256d (placeholder until RandomX library is linked)
+- `cryptonight` — CryptoNight stub (placeholder; attach a real CryptoNight or RandomX binding for production use)
+
 ### Example execution
 
 ```bash
-./cpp-miner --url stratum+tcp://pool.supportxmr.com:3333 --wallet 47N28q6ZsrCR6nq7bc5hpwE12pT4FYzyh8vrnrewJgsJ9hur1yR3coRDaVf2Zo5rhWhpJV5oiPhJcJ7Sz4wuTR6R7SeSd47 --worker rig01 --threads 16
+./cpp-miner --url stratum+tcp://gulf.moneroocean.stream:10004 --wallet 47N28q6ZsrCR6nq7bc5hpwE12pT4FYzyh8vrnrewJgsJ9hur1yR3coRDaVf2Zo5rhWhpJV5oiPhJcJ7Sz4wuTR6R7SeSd47 --worker rig01 --algorithm cryptonight --threads 16
 ```
 
 ```
-[2026-07-28 14:00:01] [INFO] Starting cpp-miner 1.0.0
-[2026-07-28 14:00:01] [INFO] CPU: AMD Ryzen 7 7435HS (16 logical cores)
-[2026-07-28 14:00:01] [INFO] Miner type: cpu
-[2026-07-28 14:00:01] [INFO] Pool: stratum+tcp://pool.supportxmr.com:3333 | Worker: rig01 | Algorithm: randomx | Mode: cpu
-[2026-07-28 14:00:01] [INFO] MinerEngine: starting 16 worker thread(s).
-[2026-07-28 14:00:01] [INFO] Miner running. Press Ctrl+C to stop.
-[2026-07-28 14:00:06] [INFO] Hashrate: 1.32e+06 H/s (current), 1.32e+06 H/s (avg) | Shares: 0 accepted, 0 rejected | Total hashes: 6655564 | Pool: connecting
+[2026-07-30 15:33:12] [INFO] Starting cpp-miner 1.0.0
+[2026-07-30 15:33:12] [INFO] CPU: AMD Ryzen 7 7435HS (16 logical cores)
+[2026-07-30 15:33:12] [INFO] Miner type: cpu
+[2026-07-30 15:33:12] [INFO] Pool: stratum+tcp://gulf.moneroocean.stream:10004 | Worker: rig01 | Algorithm: cryptonight | Mode: cpu
+[2026-07-30 15:33:12] [INFO] MinerEngine: starting 16 worker thread(s).
+[2026-07-30 15:33:12] [INFO] Miner running. Press Ctrl+C to stop.
+[2026-07-30 15:33:12] [INFO] Stratum: connected to gulf.moneroocean.stream:10004
+[2026-07-30 15:33:12] [INFO] Stratum: worker authorized.
+[2026-07-30 15:33:12] [INFO] Stratum: mining.notify type=4 size=7 data=["7c66","2392b2341c96c48d97a50796210ba4c987a2c69ceb9371c0d6d804d66bab82c0","9f74597b221073b1cafdc13f729b72f9c6554092b69e93a4eeca23f3024734ca","00000017b9fb0d93c16800000000000000000000000000000000000000000000",true,4475922,"1b050e83"]
+[2026-07-30 15:33:12] [INFO] Stratum: received MoneroOcean job 7c66 blob=2392b2341c96c48d97a50796210ba4c987a2c69ceb9371c0d6d804d66bab82c0...
+[2026-07-30 15:33:17] [INFO] Hashrate: 77.5785 H/s (current), 77.5785 H/s (avg) | Shares: 0 accepted, 0 rejected | Total hashes: 391 | Pool: connected
 ```
 
 ### Config file (optional)
@@ -133,21 +142,23 @@ If you prefer a config file, create `config.ini`:
 
 ```ini
 [Pool]
-url=stratum+tcp://pool.supportxmr.com:3333
-wallet=YOUR_WALLET_ADDRESS
+url=stratum+tcp://gulf.moneroocean.stream:10004
+wallet=47N28q6ZsrCR6nq7bc5hpwE12pT4FYzyh8vrnrewJgsJ9hur1yR3coRDaVf2Zo5rhWhpJV5oiPhJcJ7Sz4wuTR6R7SeSd47
 worker=rig01
 password=x
 
 [Mining]
 threads=16
-algorithm=randomx
+algorithm=cryptonight
 miner_type=cpu
 cpu_affinity=true
-huge_pages=true
+huge_pages=false
+donate_level=1
 
 [Performance]
 priority=normal
 print_hashrate_interval=5
+benchmark=false
 
 [Logging]
 level=info
@@ -201,6 +212,7 @@ keep_alive=true
 | `miner::MiningJob` | Plain-data Stratum job (prevhash, coinbase parts, extranonce, etc.) |
 | `hash::IHashAlgorithm` | Abstract per-thread hashing interface |
 | `hash::Sha256dAlgorithm` | Reference double-SHA256 implementation of that interface |
+| `hash::CryptonightAlgorithm` | CryptoNight stub implementation (placeholder) |
 | `hash::createAlgorithm()` | Factory mapping a config name to an `IHashAlgorithm` |
 | `threading::JobQueue` | Thread-safe "current job" slot with a version counter |
 | `threading::ThreadPool` | General-purpose task queue + worker threads |
