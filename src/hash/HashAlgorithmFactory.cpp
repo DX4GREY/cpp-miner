@@ -1,5 +1,6 @@
 #include "hash/HashAlgorithmFactory.hpp"
 #include "hash/Sha256dAlgorithm.hpp"
+#include "hash/CryptonightAlgorithm.hpp"
 
 #include <stdexcept>
 #include <algorithm>
@@ -32,6 +33,10 @@ HashAlgorithmPtr createAlgorithm(const std::string& name) {
         // box. Swap this branch to instantiate a real RandomX wrapper
         // once that dependency is added to CMakeLists.txt.
         return std::make_unique<Sha256dAlgorithm>();
+    }
+
+    if (lower == "cryptonight" || lower == "cn") {
+        return std::make_unique<CryptonightAlgorithm>();
     }
 
     throw std::invalid_argument("Unknown mining algorithm: " + name);

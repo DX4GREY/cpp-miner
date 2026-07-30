@@ -83,6 +83,7 @@ set(SOURCES
     src/network/StratumClient.cpp
     src/miner/MinerEngine.cpp
     src/hash/Sha256dAlgorithm.cpp
+    src/hash/CryptonightAlgorithm.cpp
     src/hash/HashAlgorithmFactory.cpp
     src/threading/ThreadPool.cpp
     src/logger/Logger.cpp

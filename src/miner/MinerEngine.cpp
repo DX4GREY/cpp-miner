@@ -145,8 +145,6 @@ void MinerEngine::workerLoop(std::size_t workerIndex) {
             std::string workBlob = job.blob;
             // The blob is hex; each byte is represented by two hex chars.
             const std::size_t blobBytes = workBlob.size() / 2;
-            logger_.info("DBG: blob size hex=" + std::to_string(workBlob.size()) +
-                          " bytes=" + std::to_string(blobBytes) + " first64=" + workBlob.substr(0, 64));
             // Try writing the nonce near the end of the blob to avoid out-of-bounds
             // writes if the pool uses a short blob. We will scan backwards from the
             // end to find the first occurrence of the original 4-byte nonce pattern.
